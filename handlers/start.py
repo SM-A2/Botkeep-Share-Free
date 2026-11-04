@@ -192,6 +192,7 @@ async def on_activity(cb: CallbackQuery, videos: VideoService, users: UserServic
 
 async def _ask_count(cb: CallbackQuery, users: UserService, cfg: Config,
                      category: str | None, fresh: bool, settings: SettingsService) -> None:
+    cfg = users.cfg_for(cfg, cb.from_user.id)
     data = {"category": category} if category else None
     ok = await users.set_state(cb.from_user.id, "waiting_for_video_count", data)
     if not ok:

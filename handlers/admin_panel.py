@@ -56,10 +56,13 @@ BAN_REASON_HINT = (f"Send why this user is being blocked (up to {BANNED_REASON_M
                    "Send <code>-</code> to block without a reason.")
 RATE_HINT_ONE = ("Send how many requests this user may make <b>per {w}</b> (1–" + str(RATE_MAX) +
                  ").\nSend <code>0</code> for no limit in this window.")
-RATE_HINT_ALL = ("Send 4 numbers: <b>second, minute, hour, day</b> — e.g. <code>1 10 100 500</code>.\n"
+RATE_HINT_ALL = ("Send 4 numbers: <b>60 seconds, 5 minutes, 1 hour, 1 day</b> — e.g. "
+                 "<code>5 15 40 100</code>.\n"
                  "Use <code>0</code> (or <code>-</code>) for no limit in a window, e.g. "
-                 "<code>0 5 0 50</code>.")
-RATE_KINDS = ("rls", "rlm", "rlh", "rld", "rla")
+                 "<code>0 15 0 100</code>.")
+MAXV_HINT = ("Send the most videos this user may ask for in ONE request (1–200).\n"
+             "Send <code>0</code> to use the normal bot-wide maximum again.")
+RATE_KINDS = ("rl60", "rl5m", "rl1h", "rl1d", "rla", "rlv")
 esc = ui.html_escape
 
 
@@ -678,8 +681,12 @@ class Panel(ForceSubPanelMixin, ReferralPanelMixin):
         rule = self.users.rate_rule(user_id)
         if rule is None:
             c = self.cfg
-            return f"🚦 Rate limit: <b>Default</b> ({c.rate_limit_requests} / {c.rate_limit_window}s)"
-        return f"🚦 Rate limit: <b>Custom</b> — {esc(rate_rule_text(rule))}"
+            line = f"🚦 Rate limit: <b>Default</b> ({c.rate_limit_requests} / {c.rate_limit_window}s)"
+        else:
+            line = f"🚦 Rate limit: <b>Custom</b> — {esc(rate_rule_text(rule))}"
+        mv = self.users.max_videos_rule(user_id)
+        return (line + "\n🎬 Max videos / request: "
+                + (f"<b>{mv}</b> (custom)" if mv else f"<b>{self.cfg.max_videos_per_request}</b> (default)"))
 
     async def p_usr_rate(self, user_id: int) -> tuple[str, Kb]:
         """Per-user request limits: second / minute / hour / day (admin-set, one user at a time)."""
@@ -695,18 +702,23 @@ class Panel(ForceSubPanelMixin, ReferralPanelMixin):
         lines = "\n".join(
             f"{icon} Per {label}: <b>{shown.get(col) or unset}</b>"
             for (_, col, _, label, _), icon in zip(RATE_WINDOWS, ("⚡", "⏱️", "🕐", "📅")))
-        text = (f"🚦 <b>USER RATE LIMIT</b>\n\n🆔 User: <code>{user_id}</code>\n\n{lines}\n\n{mode}\n\n"
+        mv = self.users.max_videos_rule(user_id)
+        lines += (f"\n\n🎬 Max videos per request: <b>{mv if mv else str(c.max_videos_per_request) + ' (default)'}</b>")
+        text = (f"🚦 <b>USER LIMITS</b>\n\n🆔 User: <code>{user_id}</code>\n\n{lines}\n\n{mode}\n\n"
                 "<i>One request = one batch / video request. Each window is counted separately; "
                 "a request is refused as soon as one window is full.</i>")
         rows = [
-            [B(text="⚡ Per second", callback_data=f"adm:in:rls:{user_id}"),
-             B(text="⏱️ Per minute", callback_data=f"adm:in:rlm:{user_id}")],
-            [B(text="🕐 Per hour", callback_data=f"adm:in:rlh:{user_id}"),
-             B(text="📅 Per day", callback_data=f"adm:in:rld:{user_id}")],
+            [B(text="⚡ 60 seconds", callback_data=f"adm:in:rl60:{user_id}"),
+             B(text="⏱️ 5 minutes", callback_data=f"adm:in:rl5m:{user_id}")],
+            [B(text="🕐 1 hour", callback_data=f"adm:in:rl1h:{user_id}"),
+             B(text="📅 1 day", callback_data=f"adm:in:rl1d:{user_id}")],
             [B(text="✏️ Set all 4 at once", callback_data=f"adm:in:rla:{user_id}")],
+            [B(text="🎬 Max videos / request", callback_data=f"adm:in:rlv:{user_id}")],
         ]
         if rule is not None:
-            rows.append([B(text="♻️ Back to default", callback_data=f"adm:do:rlreset:{user_id}")])
+            rows.append([B(text="♻️ Rate limit → default", callback_data=f"adm:do:rlreset:{user_id}")])
+        if mv:
+            rows.append([B(text="♻️ Max videos → default", callback_data=f"adm:do:mvreset:{user_id}")])
         return text, kb(*rows, back=f"adm:usr:view:{user_id}")
 
     async def p_usr_banpick(self, user_id: int) -> tuple[str, Kb]:
@@ -1401,6 +1413,13 @@ class Panel(ForceSubPanelMixin, ReferralPanelMixin):
             text, markup = await self.p_usr_rate(target_id)
             await self._show(cb, text, markup)
             return
+        if action == "mvreset" and target_id is not None:
+            await self.users.clear_max_videos(target_id)
+            await self._log(uid, f"user {target_id} max videos back to default")
+            await cb.answer("♻️ Back to the default maximum")
+            text, markup = await self.p_usr_rate(target_id)
+            await self._show(cb, text, markup)
+            return
         if action in ("svon", "svoff") and target_id is not None:
             allowed = action == "svon"
             await self.users.set_save_allowed(target_id, allowed)
@@ -1556,11 +1575,12 @@ class Panel(ForceSubPanelMixin, ReferralPanelMixin):
             "cemoji": ("Button emoji", "Send one emoji.", "adm:cust"),
             "curl": ("Button link", "Send a link starting with https://", "adm:cust"),
             "banreason": ("Block reason", BAN_REASON_HINT, f"adm:usr:view:{arg}"),
-            "rls": ("Limit per second", RATE_HINT_ONE.format(w="second"), f"adm:usr:rate:{arg}"),
-            "rlm": ("Limit per minute", RATE_HINT_ONE.format(w="minute"), f"adm:usr:rate:{arg}"),
-            "rlh": ("Limit per hour", RATE_HINT_ONE.format(w="hour"), f"adm:usr:rate:{arg}"),
-            "rld": ("Limit per day", RATE_HINT_ONE.format(w="day"), f"adm:usr:rate:{arg}"),
+            "rl60": ("Limit per 60 seconds", RATE_HINT_ONE.format(w="60 seconds"), f"adm:usr:rate:{arg}"),
+            "rl5m": ("Limit per 5 minutes", RATE_HINT_ONE.format(w="5 minutes"), f"adm:usr:rate:{arg}"),
+            "rl1h": ("Limit per 1 hour", RATE_HINT_ONE.format(w="1 hour"), f"adm:usr:rate:{arg}"),
+            "rl1d": ("Limit per 1 day", RATE_HINT_ONE.format(w="1 day"), f"adm:usr:rate:{arg}"),
             "rla": ("All rate limits", RATE_HINT_ALL, f"adm:usr:rate:{arg}"),
+            "rlv": ("Max videos per request", MAXV_HINT, f"adm:usr:rate:{arg}"),
         }
         if kind not in specs:
             await cb.answer()
@@ -1922,17 +1942,34 @@ class Panel(ForceSubPanelMixin, ReferralPanelMixin):
         rule[col] = value
         await self._save_rate(message, target, rule)
 
-    async def _i_rls(self, message: Message, data: dict, text: str) -> None:
-        await self._rate_one(message, data, text, "per_second")
+    async def _i_rl60(self, message: Message, data: dict, text: str) -> None:
+        await self._rate_one(message, data, text, "per_60s")
 
-    async def _i_rlm(self, message: Message, data: dict, text: str) -> None:
-        await self._rate_one(message, data, text, "per_minute")
+    async def _i_rl5m(self, message: Message, data: dict, text: str) -> None:
+        await self._rate_one(message, data, text, "per_5m")
 
-    async def _i_rlh(self, message: Message, data: dict, text: str) -> None:
-        await self._rate_one(message, data, text, "per_hour")
+    async def _i_rl1h(self, message: Message, data: dict, text: str) -> None:
+        await self._rate_one(message, data, text, "per_1h")
 
-    async def _i_rld(self, message: Message, data: dict, text: str) -> None:
-        await self._rate_one(message, data, text, "per_day")
+    async def _i_rl1d(self, message: Message, data: dict, text: str) -> None:
+        await self._rate_one(message, data, text, "per_1d")
+
+    async def _i_rlv(self, message: Message, data: dict, text: str) -> None:
+        target = int(data.get("arg", 0) or 0)
+        if not target:
+            await self.users.clear_state(message.from_user.id)
+            return
+        if not re.fullmatch(r"[0-9]{1,3}", text.strip()) or int(text) > 200:
+            await self._retry(message, "Send a whole number from 1 to 200, or 0 for the default.")
+            return
+        value = int(text)
+        if value == 0:
+            await self.users.clear_max_videos(target)
+            await self._log(message.from_user.id, f"user {target} max videos back to default")
+        else:
+            await self.users.set_max_videos(target, value)
+            await self._log(message.from_user.id, f"user {target} max videos per request: {value}")
+        await self._finish(message, f"adm:usr:rate:{target}", "✅ <b>Max videos saved.</b>\n\n")
 
     async def _i_rla(self, message: Message, data: dict, text: str) -> None:
         target = int(data.get("arg", 0) or 0)
@@ -1941,7 +1978,7 @@ class Panel(ForceSubPanelMixin, ReferralPanelMixin):
             return
         tokens = [t for t in re.split(r"[\s,/;|]+", text.strip()) if t]
         if len(tokens) != 4:
-            await self._retry(message, "Send exactly 4 numbers: second, minute, hour, day "
+            await self._retry(message, "Send exactly 4 numbers: 60 seconds, 5 minutes, 1 hour, 1 day "
                                        "(0 = no limit).")
             return
         try:

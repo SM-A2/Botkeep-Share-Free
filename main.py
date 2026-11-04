@@ -63,6 +63,7 @@ async def main() -> None:
     await users.load_save_allowed()
     await users.load_age_verified()
     await users.load_rate_rules()   # per-user rate limits set by the admin
+    await users.load_max_videos()   # per-user max videos per request
     # Client 2 - Telethon USER client (API_ID + API_HASH + SESSION_STRING): history scanning
     # ONLY. It is created lazily inside ScannerService; the bot token is never used for it.
     scanner = ScannerService(cfg, db, videos, events)

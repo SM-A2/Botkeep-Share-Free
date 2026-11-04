@@ -61,6 +61,8 @@ async def run_request(bot: Bot, users: UserService, delivery: DeliveryService,
     """Lock -> rate limit -> unseen check -> deliver -> completion message.
 
     `locked=True` means the caller already moved the user into the 'delivering' state."""
+    cfg = users.cfg_for(cfg, user_id)
+    count = min(count, cfg.max_videos_per_request)     # safety net for old buttons / a lowered max
     if not locked and not await users.acquire_delivery_lock(user_id):
         await _alert(bot, chat_id, cb, ui.busy_text())
         return
@@ -143,6 +145,7 @@ async def on_number(message: Message, bot: Bot, users: UserService, cfg: Config,
                     delivery: DeliveryService, videos: VideoService,
                     settings: SettingsService) -> None:
     await users.upsert(message.from_user)
+    cfg = users.cfg_for(cfg, message.from_user.id)     # personal max videos (if the admin set one)
     text = message.text.strip()
     count = int(text) if re.fullmatch(r"[0-9]{1,6}", text) else 0
     if count < 1 or count > cfg.max_videos_per_request:
@@ -201,7 +204,7 @@ def _parse(data: str, cfg: Config) -> tuple[str, int] | None:
 @router.callback_query(F.data.startswith("more:") | F.data.startswith("fresh:"))
 async def on_more(cb: CallbackQuery, bot: Bot, users: UserService, delivery: DeliveryService,
                   videos: VideoService, cfg: Config, settings: SettingsService) -> None:
-    parsed = _parse(cb.data, cfg)
+    parsed = _parse(cb.data, users.cfg_for(cfg, cb.from_user.id))
     if parsed is None:
         await cb.answer()
         return
@@ -222,6 +225,7 @@ async def on_menu_more(cb: CallbackQuery, bot: Bot, users: UserService,
     if not settings.button_on("btn_more"):
         await cb.answer(ui.alert_text(ui.unavailable_text()), show_alert=True)
         return
+    cfg = users.cfg_for(cfg, cb.from_user.id)
     category = cb.data.split(":", 1)[1]
     last = await videos.last_request_size(cb.from_user.id)
     count = max(1, min(last or min(10, cfg.max_videos_per_request), cfg.max_videos_per_request))
@@ -237,6 +241,7 @@ async def on_qty(cb: CallbackQuery, bot: Bot, users: UserService, cfg: Config,
                  settings: SettingsService) -> None:
     """1 / 5 / 10 ... buttons under "How many videos?". Exactly the same path as typing the
     number: New/Old menu entries start the delivery, the generic entry asks for the collection."""
+    cfg = users.cfg_for(cfg, cb.from_user.id)
     arg = cb.data.split(":", 1)[1]
     if arg == "custom":
         await cb.answer(ui.alert_text(

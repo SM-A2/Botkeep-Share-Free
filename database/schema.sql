@@ -383,24 +383,42 @@ CREATE TABLE IF NOT EXISTS user_favorites (
 CREATE INDEX IF NOT EXISTS idx_fav_user ON user_favorites (user_id, created_at DESC);
 
 -- ======================================================================================
--- Per-user rate limits (additive, idempotent). An admin can give every user their own limits
--- per second / minute / hour / day. NULL = no limit for that window. A user WITHOUT a row here
--- keeps using the global limit (RATE_LIMIT_REQUESTS / RATE_LIMIT_WINDOW) exactly as before.
+-- Per-user limits (additive, idempotent), set by an admin for ONE user at a time:
+--   * request rate in 4 windows: 60 seconds / 5 minutes / 1 hour / 1 day  (user_rate_rules)
+--   * max videos per request                                              (user_max_videos)
+-- NULL = no limit for that window. A user WITHOUT a row keeps using the global limits
+-- (RATE_LIMIT_REQUESTS / RATE_LIMIT_WINDOW, MAX_VIDEOS_PER_REQUEST) exactly as before.
 -- ======================================================================================
+-- One-time: the first draft used per-second/minute/hour/day windows; start clean with the new ones.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM meta WHERE key = 'rate_windows_v2') THEN
+        DROP TABLE IF EXISTS user_rate_counters;
+        DROP TABLE IF EXISTS user_rate_rules;
+        INSERT INTO meta (key, value) VALUES ('rate_windows_v2', 'done');
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS user_rate_rules (
     user_id    BIGINT PRIMARY KEY,
-    per_second INTEGER CHECK (per_second IS NULL OR per_second > 0),
-    per_minute INTEGER CHECK (per_minute IS NULL OR per_minute > 0),
-    per_hour   INTEGER CHECK (per_hour   IS NULL OR per_hour   > 0),
-    per_day    INTEGER CHECK (per_day    IS NULL OR per_day    > 0),
+    per_60s    INTEGER CHECK (per_60s IS NULL OR per_60s > 0),
+    per_5m     INTEGER CHECK (per_5m  IS NULL OR per_5m  > 0),
+    per_1h     INTEGER CHECK (per_1h  IS NULL OR per_1h  > 0),
+    per_1d     INTEGER CHECK (per_1d  IS NULL OR per_1d  > 0),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Fixed-window counters for the custom limits (one row per user and window: s / m / h / d).
+-- Fixed-window counters for the custom limits (one row per user and window).
 CREATE TABLE IF NOT EXISTS user_rate_counters (
     user_id      BIGINT NOT NULL,
-    win          TEXT   NOT NULL CHECK (win IN ('s', 'm', 'h', 'd')),
+    win          TEXT   NOT NULL CHECK (win IN ('60s', '5m', '1h', '1d')),
     window_start TIMESTAMPTZ NOT NULL DEFAULT now(),
     hits         INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, win)
+);
+
+CREATE TABLE IF NOT EXISTS user_max_videos (
+    user_id    BIGINT PRIMARY KEY,
+    max_videos INTEGER NOT NULL CHECK (max_videos BETWEEN 1 AND 200),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

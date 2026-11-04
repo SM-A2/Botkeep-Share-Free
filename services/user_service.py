@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import math
 
@@ -7,10 +8,10 @@ log = logging.getLogger("users")
 
 # Per-user rate-limit windows: (counter key, column in user_rate_rules, seconds, label, short).
 RATE_WINDOWS = (
-    ("s", "per_second", 1, "second", "sec"),
-    ("m", "per_minute", 60, "minute", "min"),
-    ("h", "per_hour", 3600, "hour", "hour"),
-    ("d", "per_day", 86400, "day", "day"),
+    ("60s", "per_60s", 60, "60 seconds", "60s"),
+    ("5m", "per_5m", 300, "5 minutes", "5m"),
+    ("1h", "per_1h", 3600, "1 hour", "1h"),
+    ("1d", "per_1d", 86400, "1 day", "1d"),
 )
 RATE_COLUMNS = tuple(w[1] for w in RATE_WINDOWS)
 RATE_MAX = 100000     # largest limit an admin may set for one window
@@ -48,6 +49,7 @@ class UserService:
         self.age_verified_ids: set[int] = set()   # mirror of users.age_verified_at IS NOT NULL
         self.rate_rules: dict[int, dict] = {}     # mirror of user_rate_rules (custom per-user limits)
         self._rate_denied: dict[int, tuple] = {}  # user_id -> (limit, label, retry seconds)
+        self.max_videos_rules: dict[int, int] = {}   # mirror of user_max_videos (per-user max per request)
         # Optional hook (set by the referral system): awaited once, when a user row is created.
         self.on_new_user = None
 
@@ -282,13 +284,44 @@ class UserService:
         clean = {c: (int(rule[c]) if rule.get(c) else None) for c in RATE_COLUMNS}
         await self.db.pool.execute(
             """
-            INSERT INTO user_rate_rules (user_id, per_second, per_minute, per_hour, per_day)
+            INSERT INTO user_rate_rules (user_id, per_60s, per_5m, per_1h, per_1d)
             VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (user_id) DO UPDATE SET
-                per_second = EXCLUDED.per_second, per_minute = EXCLUDED.per_minute,
-                per_hour = EXCLUDED.per_hour, per_day = EXCLUDED.per_day, updated_at = now()
+                per_60s = EXCLUDED.per_60s, per_5m = EXCLUDED.per_5m,
+                per_1h = EXCLUDED.per_1h, per_1d = EXCLUDED.per_1d, updated_at = now()
             """, user_id, *(clean[c] for c in RATE_COLUMNS))
         self.rate_rules[user_id] = clean
+
+    # ---------- per-user max videos per request (admin-set) ----------
+    async def load_max_videos(self) -> None:
+        rows = await self.db.pool.fetch("SELECT user_id, max_videos FROM user_max_videos")
+        self.max_videos_rules = {r["user_id"]: r["max_videos"] for r in rows}
+
+    def max_videos_rule(self, user_id: int) -> int | None:
+        return self.max_videos_rules.get(user_id)
+
+    async def set_max_videos(self, user_id: int, value: int) -> None:
+        await self.db.pool.execute(
+            "INSERT INTO user_max_videos (user_id, max_videos) VALUES ($1, $2) "
+            "ON CONFLICT (user_id) DO UPDATE SET max_videos = EXCLUDED.max_videos, updated_at = now()",
+            user_id, value)
+        self.max_videos_rules[user_id] = value
+
+    async def clear_max_videos(self, user_id: int) -> bool:
+        removed = await self.db.pool.fetchval(
+            "DELETE FROM user_max_videos WHERE user_id = $1 RETURNING 1", user_id)
+        self.max_videos_rules.pop(user_id, None)
+        return removed is not None
+
+    def cfg_for(self, cfg, user_id: int | None):
+        """The config AS THIS USER SEES IT: the same object for everybody without a personal
+        max, otherwise a copy whose max videos per request (and group max, never above the
+        group limit) is the admin-set value. All messages / buttons / checks then just work."""
+        m = self.max_videos_rules.get(user_id) if user_id is not None else None
+        if not m:
+            return cfg
+        return dataclasses.replace(cfg, max_videos_per_request=m,
+                                   group_max_videos=min(cfg.group_max_videos, m))
 
     async def clear_rate_rule(self, user_id: int) -> bool:
         """Back to the global limit. Returns True if the user had a custom rule."""

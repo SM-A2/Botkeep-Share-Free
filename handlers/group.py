@@ -216,6 +216,7 @@ async def _run_group_request(bot: Bot, users: UserService, delivery: DeliverySer
                              count: int, reply_to: int | None = None) -> None:
     """Lock -> rate limit -> unseen check -> deliver into the group -> completion message."""
     uid = user.id
+    count = min(count, users.cfg_for(cfg, uid).group_max_videos)     # personal max (safety net)
 
     async def say(text: str, kb=None) -> Message | None:
         return await _say(bot, chat_id, text, kb, thread_id, reply_to)
@@ -313,6 +314,7 @@ async def cmd_collection(message: Message, command: CommandObject, bot: Bot, cfg
     category = (command.command or "").lower()
     if category not in CATS:
         return
+    cfg = users.cfg_for(cfg, message.from_user.id if message.from_user else None)
     count = parse_count(command.args, cfg.group_max_videos)
     if count is None:
         _self_delete(await message.reply(
@@ -331,6 +333,7 @@ async def cmd_collection(message: Message, command: CommandObject, bot: Bot, cfg
 async def cmd_video(message: Message, command: CommandObject, bot: Bot, cfg: Config,
                     settings: SettingsService, users: UserService,
                     force_sub: ForceSubService, fs_cfg: ForceSubConfig) -> None:
+    cfg = users.cfg_for(cfg, message.from_user.id if message.from_user else None)
     count = parse_count(command.args, cfg.group_max_videos)
     if count is None:
         _self_delete(await message.reply(
@@ -383,7 +386,7 @@ async def on_choose(cb: CallbackQuery, bot: Bot, users: UserService, delivery: D
     if not settings.flag("group_mode") and cb.from_user.id not in cfg.admin_ids:
         await cb.answer(ui.alert_text(DISABLED_TEXT), show_alert=True)
         return
-    count = max(1, min(count, cfg.group_max_videos))
+    count = max(1, min(count, users.cfg_for(cfg, cb.from_user.id).group_max_videos))
     await cb.answer()
     chat_id, thread_id = cb.message.chat.id, _thread(cb.message)
     try:
